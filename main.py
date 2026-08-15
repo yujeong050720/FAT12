@@ -1,131 +1,102 @@
 import sys
 import struct
 
-
-def read_u16(data, offset):
+def u16(data, offset):
     return struct.unpack_from("<H", data, offset)[0]
 
-
-def read_u32(data, offset):
+def u32(data, offset):
     return struct.unpack_from("<I", data, offset)[0]
 
-
-def get_short_filename(entry):
-    name = entry[0:8].decode("ascii", errors="ignore").rstrip()
-    ext = entry[8:11].decode("ascii", errors="ignore").rstrip()
-
-    if ext:
-        return name + "." + ext
-
-    return name
-
-
 def main():
+    # 실행할 때 증거 이미지명을 입력받음
     if len(sys.argv) != 2:
-        print(f"Usage: python3 {sys.argv[0]} <fat32 image>")
+        print(f"Usage: python3 {sys.argv[0]} <image>")
         return
 
-    image_name = sys.argv[1]
+    with open(sys.argv[1], "rb") as f:
 
-    with open(image_name, "rb") as f:
-
-        # -------------------------
-        # 1. FAT32 Boot Sector
-        # -------------------------
+        # Boot Sector 읽기
         boot = f.read(512)
 
-        bytes_per_sector = read_u16(boot, 11)
+        bytes_per_sector = u16(boot, 11)
         sectors_per_cluster = boot[13]
-        reserved_sector_count = read_u16(boot, 14)
-        number_of_fats = boot[16]
-        fat_size = read_u32(boot, 36)
-        root_cluster = read_u32(boot, 44)
+        reserved_sectors = u16(boot, 14)
+        num_fats = boot[16]
+        fat_size = u32(boot, 36)
+        root_cluster = u32(boot, 44)
 
         cluster_size = bytes_per_sector * sectors_per_cluster
 
-        # FAT 시작 위치
-        fat_offset = reserved_sector_count * bytes_per_sector
+        # FAT 영역 시작 위치
+        fat_offset = reserved_sectors * bytes_per_sector
 
-        # Data 영역 시작 위치
-        first_data_sector = (
-            reserved_sector_count
-            + number_of_fats * fat_size
-        )
+        # Data 영역 시작 Sector
+        first_data_sector = reserved_sectors + (num_fats * fat_size)
 
-        # cluster 번호 -> 실제 이미지 offset
+        # Cluster 번호를 실제 이미지 offset으로 변환
         def cluster_offset(cluster):
-            sector = (
-                first_data_sector
-                + (cluster - 2) * sectors_per_cluster
-            )
-
+            sector = first_data_sector + (cluster - 2) * sectors_per_cluster
             return sector * bytes_per_sector
 
-        # -------------------------
-        # 2. FAT에서 다음 Cluster 찾기
-        # -------------------------
+        # FAT에서 다음 Cluster 번호 읽기
         def next_cluster(cluster):
-            offset = fat_offset + cluster * 4
-
-            f.seek(offset)
-
+            f.seek(fat_offset + cluster * 4)
             value = struct.unpack("<I", f.read(4))[0]
-
-            # FAT32에서는 하위 28bit만 사용
             return value & 0x0FFFFFFF
 
-        # -------------------------
-        # 3. Root Directory 탐색
-        # -------------------------
-        current_cluster = root_cluster
+        # Root Directory의 첫 Cluster부터 시작
+        cluster = root_cluster
 
-        while current_cluster < 0x0FFFFFF8:
+        while cluster < 0x0FFFFFF8:
 
-            f.seek(cluster_offset(current_cluster))
+            f.seek(cluster_offset(cluster))
+            data = f.read(cluster_size)
 
-            cluster_data = f.read(cluster_size)
-
+            # Directory Entry는 하나당 32 byte
             for i in range(0, cluster_size, 32):
 
-                entry = cluster_data[i:i + 32]
+                entry = data[i:i + 32]
 
-                first_byte = entry[0]
-
-                # 0x00 : 이후 Directory Entry 없음
-                if first_byte == 0x00:
+                # Directory 끝
+                if entry[0] == 0x00:
                     return
 
-                # 0xE5 : 삭제된 파일
-                if first_byte == 0xE5:
+                # 삭제된 Entry
+                if entry[0] == 0xE5:
                     continue
 
                 attribute = entry[11]
 
-                # LFN Entry
+                # LFN 무시
                 if attribute == 0x0F:
                     continue
 
-                # Volume Label
+                # Volume Label 무시
                 if attribute & 0x08:
                     continue
 
-                filename = get_short_filename(entry)
+                # 8.3 파일명
+                name = entry[0:8].decode("ascii", errors="ignore").rstrip()
+                ext = entry[8:11].decode("ascii", errors="ignore").rstrip()
+
+                if ext:
+                    filename = name + "." + ext
+                else:
+                    filename = name
 
                 # 시작 Cluster
-                cluster_high = read_u16(entry, 20)
-                cluster_low = read_u16(entry, 26)
+                cluster_high = u16(entry, 20)
+                cluster_low = u16(entry, 26)
 
-                start_cluster = (
-                    (cluster_high << 16)
-                    | cluster_low
-                )
+                start_cluster = (cluster_high << 16) | cluster_low
 
-                # 파일 크기
-                filesize = read_u32(entry, 28)
+                # File Size
+                filesize = u32(entry, 28)
 
                 print(f"{filename},{start_cluster},{filesize}")
 
-            current_cluster = next_cluster(current_cluster)
+            # Root Directory가 다음 Cluster로 이어져 있으면 이동
+            cluster = next_cluster(cluster)
 
 
 if __name__ == "__main__":
